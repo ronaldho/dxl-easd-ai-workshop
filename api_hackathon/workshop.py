@@ -52,12 +52,15 @@ def review_contract(spec: dict, ai) -> list[dict]:
          It is not "//orders" -- the slash belongs to the key name "/orders".
     """
     findings = ai.ask("contract_review", spec)
+    # print(json.dumps(findings, indent=2)) 
+    # print("----")
+    # print(json.dumps(spec, indent=2)) 
     verified = []
     for f in findings:
         path   = f.get("path", "")
         method = f.get("method", "")
         if (path in spec["paths"] and
-                method in spec["paths"][path]):
+                method in spec["paths"][path]) and pointer_resolves(spec, operation_pointer(f["path"], f["method"])):
             verified.append(f)
     return verified
 
@@ -95,6 +98,9 @@ def design_negative_tests(spec: dict, ai) -> list[dict]:
          expected_status.
     """
     findings =  ai.ask("negative_tests", spec)
+    # print(json.dumps(findings, indent=2)) 
+    # print("----")
+    # print(json.dumps(spec, indent=2)) 
     verified = []
     allowed_status = [400, 401, 403, 404, 409, 422]
     required = {"name", "method", "path", "input", "expected_status"}
@@ -105,7 +111,7 @@ def design_negative_tests(spec: dict, ai) -> list[dict]:
         method = f.get("method", "")
         expected_status  = f.get("expected_status", "")
         if (path in spec["paths"] and method in spec["paths"][path] and
-          expected_status in allowed_status ):
+          expected_status in allowed_status ) and pointer_resolves(spec, operation_pointer(f["path"], f["method"])):
             verified.append(f)
     return verified
 
@@ -133,9 +139,11 @@ def diagnose_incident(logs: str, ai) -> dict:
     appears literally somewhere inside the logs string.
     The log file is at  data/incident.log  -- open it to see what is there.
     """
+    # print(json.dumps(logs, indent=2)) 
+    # return ai.ask("incident_diagnosis", logs)[0]   # [0] is unverified; fix it
     verified = []
     findings = ai.ask("incident_diagnosis", logs)
-
+    # print(json.dumps(findings, indent=2))
     for f in findings:
         evidence = f['evidence']
         if all(item in logs for item in evidence):
@@ -198,8 +206,11 @@ def _is_proven(claim, v1, v2) -> bool:
     if kind == "operation_removed":
         path   = claim.get("path", "")
         method = claim.get("method", "")
-        if (path in v1["paths"] and method in v1["paths"].get(path, {})) or (path not in v2["paths"] and method not in v2["paths"].get(path, {})):
-            return True
+        ptr = operation_pointer(claim["path"], claim["method"])
+        return pointer_resolves(v1, ptr) and not pointer_resolves(v2, ptr)
+
+        # if (path in v1["paths"] and method in v1["paths"].get(path, {})) or (path not in v2["paths"] and method not in v2["paths"].get(path, {})):
+        #     return True
     elif kind == "parameter_became_required":
         old = find_param(v1, claim["path"], claim["method"], claim["parameter"])
         new = find_param(v2, claim["path"], claim["method"], claim["parameter"])
@@ -222,3 +233,24 @@ def find_param(spec, path, method, name):
         if param.get("name") == name:
             return param
     return None
+
+
+def pointer_resolves(doc, pointer) -> bool:
+    """True if the JSON Pointer points at something that exists inside doc."""
+    if not pointer.startswith("/"):
+        return False
+    node = doc
+    for token in pointer.split("/")[1:]:
+        token = token.replace("~1", "/").replace("~0", "~")
+        if isinstance(node, dict) and token in node:
+            node = node[token]
+        elif isinstance(node, list) and token.isdigit() and int(token) < len(node):
+            node = node[int(token)]
+        else:
+            return False
+    return True
+
+
+def operation_pointer(path, method):
+    return "/paths/" + path.replace("~", "~0").replace("/", "~1") + "/" + method
+
