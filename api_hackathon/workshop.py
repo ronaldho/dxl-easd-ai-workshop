@@ -17,7 +17,7 @@ The AI assistant (ai.ask(...)) always returns a list of dicts. The shapes are
 shown in the comments below. Your job is to filter that list so only items
 that are verifiable against real evidence survive.
 """
-
+import json
 
 def review_contract(spec: dict, ai) -> list[dict]:
     """Level 1 -- return only findings supported by the OpenAPI contract.
@@ -51,7 +51,15 @@ def review_contract(spec: dict, ai) -> list[dict]:
          "/paths/~1orders/get" is spec["paths"]["/orders"]["get"].
          It is not "//orders" -- the slash belongs to the key name "/orders".
     """
-    return ai.ask("contract_review", spec)
+    findings = ai.ask("contract_review", spec)
+    verified = []
+    for f in findings:
+        path   = f.get("path", "")
+        method = f.get("method", "")
+        if (path in spec["paths"] and
+                method in spec["paths"][path]):
+            verified.append(f)
+    return verified
 
 
 def design_negative_tests(spec: dict, ai) -> list[dict]:
@@ -86,7 +94,20 @@ def design_negative_tests(spec: dict, ai) -> list[dict]:
       3. The case has all required fields: name, method, path, input,
          expected_status.
     """
-    return ai.ask("negative_tests", spec)
+    findings =  ai.ask("negative_tests", spec)
+    verified = []
+    allowed_status = [400, 401, 403, 404, 409, 422]
+    required = {"name", "method", "path", "input", "expected_status"}
+    for f in findings:
+        if not required <= f.keys():
+          continue
+        path   = f.get("path", "")
+        method = f.get("method", "")
+        expected_status  = f.get("expected_status", "")
+        if (path in spec["paths"] and method in spec["paths"][path] and
+          expected_status in allowed_status ):
+            verified.append(f)
+    return verified
 
 
 def diagnose_incident(logs: str, ai) -> dict:
@@ -112,7 +133,15 @@ def diagnose_incident(logs: str, ai) -> dict:
     appears literally somewhere inside the logs string.
     The log file is at  data/incident.log  -- open it to see what is there.
     """
-    return ai.ask("incident_diagnosis", logs)[0]   # [0] is unverified; fix it
+    verified = []
+    findings = ai.ask("incident_diagnosis", logs)
+
+    for f in findings:
+        evidence = f['evidence']
+        if all(item in logs for item in evidence):
+          verified.append(f)
+    print(verified)
+    return verified[0]
 
 
 def review_migration(v1: dict, v2: dict, ai) -> list[dict]:
@@ -155,4 +184,41 @@ def review_migration(v1: dict, v2: dict, ai) -> list[dict]:
       "schema_changed"          -- parameter["schema"] differs between v1 and v2.
                                    If the schemas are identical the claim is false.
     """
-    return ai.ask("migration_review", {"v1": v1, "v2": v2})
+    # return ai.ask("migration_review", {"v1": v1, "v2": v2})
+    findings =  ai.ask("migration_review", {"v1": v1, "v2": v2})
+    verified = []
+    for f in findings:
+        if _is_proven(f, v1, v2):
+            verified.append(f)
+    return verified
+
+
+def _is_proven(claim, v1, v2) -> bool:
+    kind = claim.get("kind")
+    if kind == "operation_removed":
+        path   = claim.get("path", "")
+        method = claim.get("method", "")
+        if (path in v1["paths"] and method in v1["paths"].get(path, {})) or (path not in v2["paths"] and method not in v2["paths"].get(path, {})):
+            return True
+    elif kind == "parameter_became_required":
+        old = find_param(v1, claim["path"], claim["method"], claim["parameter"])
+        new = find_param(v2, claim["path"], claim["method"], claim["parameter"])
+        if old is None or new is None:
+            return False
+        return  not old.get("required", False) and new.get("required", False)
+        
+        
+    elif kind == "schema_changed":
+        old = find_param(v1, claim["path"], claim["method"], claim["parameter"])
+        new = find_param(v2, claim["path"], claim["method"], claim["parameter"])
+        if old["schema"] != new["schema"]:
+            return True
+    return False    # a kind you don't recognise is unproven
+
+def find_param(spec, path, method, name):
+    """Return the parameter dict called `name`, or None if it isn't there."""
+    operation = spec["paths"].get(path, {}).get(method, {})
+    for param in operation.get("parameters", []):
+        if param.get("name") == name:
+            return param
+    return None
